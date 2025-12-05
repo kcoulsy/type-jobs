@@ -1,0 +1,11 @@
+{
+  "name": "type-jobs",
+  "version": "1.0.0",
+  "description": "A type-safe job queue system for JavaScript/TypeScript projects built on top of BullMQ and Redis.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC"
+}
