@@ -1,6 +1,6 @@
 # typed-jobs
 
-A type-safe job queue system for JavaScript/TypeScript projects built on top of BullMQ and Redis.
+A type-safe, driver-based job queue system for JavaScript/TypeScript projects. Supports multiple queue backends (Redis/BullMQ, RabbitMQ coming soon).
 
 ## Installation
 
@@ -10,6 +10,18 @@ npm install typed-jobs
 yarn add typed-jobs
 # or
 pnpm add typed-jobs
+```
+
+### Driver Dependencies
+
+If you're using the Redis driver, you'll also need to install the required dependencies:
+
+```bash
+npm install bullmq ioredis
+# or
+yarn add bullmq ioredis
+# or
+pnpm add bullmq ioredis
 ```
 
 ## Quick Start
@@ -22,13 +34,16 @@ Create a `typed-jobs.config.ts` file in your project root:
 import { defineConfig } from 'typed-jobs';
 
 export default defineConfig({
-  // Redis connection options
-  redis: {
-    host: process.env.REDIS_HOST || 'localhost',
-    port: Number(process.env.REDIS_PORT) || 6379,
-    password: process.env.REDIS_PASSWORD,
-    username: process.env.REDIS_USERNAME,
-    tls: process.env.REDIS_TLS === 'true',
+  // Driver configuration
+  driver: {
+    type: 'redis', // Currently supports 'redis', 'rabbitmq' coming soon
+    redis: {
+      host: process.env.REDIS_HOST || 'localhost',
+      port: Number(process.env.REDIS_PORT) || 6379,
+      password: process.env.REDIS_PASSWORD,
+      username: process.env.REDIS_USERNAME,
+      tls: process.env.REDIS_TLS === 'true',
+    },
   },
   // Jobs directory (relative to project root)
   jobsDir: './jobs',
@@ -153,7 +168,7 @@ Each job handler receives a `JobContext` object with the following properties:
 - `canRetry: boolean` - Whether the job can have more attempts
 - `redispatch(delay?: number): Promise<void>` - Redispatch the same job with the same data
 - `redispatchWithData(newData: TData, delay?: number): Promise<void>` - Redispatch with modified data
-- `getJob(): Job<TData>` - Get the underlying BullMQ job instance for advanced operations
+- `getJob(): DriverJob<TData>` - Get the underlying driver job instance for advanced operations
 
 ### Job Options
 
@@ -168,7 +183,7 @@ When creating a job, you can configure:
 
 ## Environment Variables
 
-Configure Redis connection via environment variables:
+When using the Redis driver, you can configure the connection via environment variables (these are used as fallbacks if not specified in config):
 
 - `REDIS_HOST` - Redis host (default: `localhost`)
 - `REDIS_PORT` - Redis port (default: `6379`)
@@ -189,23 +204,67 @@ await exampleJob.dispatch({
 });
 ```
 
+## Drivers
+
+`typed-jobs` uses a driver-based architecture, allowing you to switch between different queue backends without changing your job code.
+
+### Redis Driver (Default)
+
+The Redis driver uses BullMQ under the hood and is the recommended driver for most use cases.
+
+```typescript
+import { defineConfig } from 'typed-jobs';
+
+export default defineConfig({
+  driver: {
+    type: 'redis',
+    redis: {
+      host: 'localhost',
+      port: 6379,
+      // ... other Redis options
+    },
+  },
+  jobsDir: './jobs',
+});
+```
+
+### Future Drivers
+
+- **RabbitMQ**: Coming soon
+- More drivers can be added by implementing the `Driver` interface
+
 ## Advanced Usage
 
 ### Accessing the Queue
 
-For advanced operations, you can access the underlying BullMQ queue:
+For advanced operations, you can access the underlying driver queue:
 
 ```typescript
 import exampleJob from './jobs/example-job';
 
 const queue = exampleJob.getQueue();
-// Use BullMQ queue methods
-const jobs = await queue.getJobs(['completed', 'failed']);
+// Queue type depends on the driver used
+// For Redis driver, you can access the underlying BullMQ queue:
+// const bullQueue = (queue as any).getQueue();
+// const jobs = await bullQueue.getJobs(['completed', 'failed']);
 ```
 
-### Graceful Shutdown
+### Custom Driver Configuration
 
-The worker handles graceful shutdown automatically on `SIGINT` and `SIGTERM` signals, ensuring all jobs complete before exiting.
+You can also configure the driver programmatically:
+
+```typescript
+import { setDriver } from 'typed-jobs';
+
+setDriver({
+  type: 'redis',
+  redis: {
+    host: 'custom-redis-host',
+    port: 6380,
+  },
+});
+```
+
 
 ## License
 

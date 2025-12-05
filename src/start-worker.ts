@@ -1,95 +1,176 @@
-import * as Sentry from "@sentry/node";
-import { processAudioClipJob } from "./jobs/process-audio-clip-job";
-import { processVideoJob } from "./jobs/process-video-job";
-import { splitAudioJob } from "./jobs/split-audio-job";
-import { translateVideoAudioClipJob } from "./jobs/translate-video-audio-clip-job";
-import { workerLogger } from "./lib/logger";
-import { sseBroadcaster } from "./lib/sse-broadcaster";
+import { existsSync, readdirSync, statSync } from "fs";
+import { join, resolve, extname } from "path";
+import { pathToFileURL } from "url";
+import { setDriver } from "./driver-manager";
+import type { SimpleJob } from "./create-job";
+import type { TypedJobsConfig } from "./config";
 
-Sentry.init({
-  dsn: "https://3aa38b73204589e743b16265e1ec0d7a@o4504735425822720.ingest.us.sentry.io/4509705431875585",
-  // Adds request headers and IP for users, for more info visit:
-  // https://docs.sentry.io/platforms/javascript/guides/node/configuration/options/#sendDefaultPii
-  sendDefaultPii: true,
+// Track registered jobs for graceful shutdown
+const registeredJobs: SimpleJob[] = [];
 
-  // Enable logs to be sent to Sentry
-  _experiments: { enableLogs: true },
+async function loadConfig(): Promise<TypedJobsConfig> {
+  const configPaths = [
+    resolve(process.cwd(), "typed-jobs.config.ts"),
+    resolve(process.cwd(), "typed-jobs.config.js"),
+    resolve(process.cwd(), "typed-jobs.config.mjs"),
+  ];
 
-  // Set tracesSampleRate to 1.0 to capture 100%
-  // of transactions for tracing.
-  // We recommend adjusting this value in production
-  tracesSampleRate: 1.0,
+  for (const configPath of configPaths) {
+    if (existsSync(configPath)) {
+      try {
+        // For TypeScript config files, we'll need to use ts-node or similar
+        // For now, we'll support JS/MJS configs via dynamic import
+        // Convert to file URL for dynamic import
+        const fileUrl = pathToFileURL(configPath).href;
 
-  // Enable performance monitoring with proper integrations
-  integrations: [
-    Sentry.httpIntegration(),
-    Sentry.consoleLoggingIntegration({ levels: ["log", "error", "warn"] }),
-  ],
+        if (configPath.endsWith(".ts")) {
+          // Try to load as compiled JS first (if using ts-node or tsx)
+          const jsPath = configPath.replace(/\.ts$/, ".js");
+          if (existsSync(jsPath)) {
+            const jsUrl = pathToFileURL(jsPath).href;
+            const config = await import(jsUrl);
+            return config.default || config;
+          }
+          // If ts-node/tsx is available, try direct import
+          try {
+            const config = await import(fileUrl);
+            return config.default || config;
+          } catch {
+            throw new Error(
+              `Cannot load TypeScript config. Please use a JavaScript config or ensure ts-node/tsx is available.`
+            );
+          }
+        } else {
+          const config = await import(fileUrl);
+          return config.default || config;
+        }
+      } catch (error) {
+        throw new Error(
+          `Failed to load config from ${configPath}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+  }
 
-  // Set environment
-  environment:
-    process.env.SENTRY_ENVIRONMENT || process.env.NODE_ENV || "development",
+  throw new Error(
+    `No config file found. Please create typed-jobs.config.ts or typed-jobs.config.js in your project root.`
+  );
+}
 
-  // Set release version (you can set this via environment variable)
-  release: process.env.SENTRY_RELEASE || "worker@1.0.0",
+async function discoverJobs(jobsDir: string): Promise<SimpleJob[]> {
+  const jobsPath = resolve(process.cwd(), jobsDir);
 
-  // Enable profiling for better performance insights
-  profilesSampleRate: 1.0,
-});
+  if (!existsSync(jobsPath)) {
+    throw new Error(`Jobs directory not found: ${jobsPath}`);
+  }
 
-// Initialize SSE broadcaster for worker process
+  if (!statSync(jobsPath).isDirectory()) {
+    throw new Error(`Jobs path is not a directory: ${jobsPath}`);
+  }
+
+  const jobs: SimpleJob[] = [];
+  const files = readdirSync(jobsPath);
+
+  for (const file of files) {
+    const filePath = join(jobsPath, file);
+    const stat = statSync(filePath);
+
+    // Skip directories and non-JS/TS files
+    if (stat.isDirectory()) {
+      continue;
+    }
+
+    const ext = extname(file);
+    if (ext !== ".ts" && ext !== ".js" && ext !== ".mjs") {
+      continue;
+    }
+
+    try {
+      // Convert to file URL for dynamic import
+      const fileUrl = pathToFileURL(filePath).href;
+      // Try to import the file
+      const module = await import(fileUrl);
+      const job = module.default;
+
+      // Check if it's a SimpleJob instance
+      if (
+        job &&
+        typeof job === "object" &&
+        "register" in job &&
+        "close" in job
+      ) {
+        jobs.push(job as SimpleJob);
+      } else {
+        console.warn(
+          `Skipping ${file}: does not export a default job instance`
+        );
+      }
+    } catch (error) {
+      console.error(
+        `Failed to load job from ${file}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  return jobs;
+}
+
 async function initializeWorker() {
   try {
-    workerLogger.info({ event: "initializing" }, "Initializing worker");
+    // Load configuration
+    const config = await loadConfig();
 
-    // Initialize only the publisher for cross-process communication
-    await sseBroadcaster.initializePublisher();
+    // Initialize driver
+    setDriver(config.driver);
+
+    // Discover and register jobs
+    const jobsDir = config.jobsDir || "./jobs";
+    const jobs = await discoverJobs(jobsDir);
+
+    if (jobs.length === 0) {
+      console.warn(`No jobs found in ${jobsDir}`);
+      return;
+    }
 
     // Register all jobs
-    processVideoJob.register();
-    splitAudioJob.register();
-    translateVideoAudioClipJob.register();
-    processAudioClipJob.register();
+    for (const job of jobs) {
+      await job.register();
+      registeredJobs.push(job);
+    }
 
-    workerLogger.info(
-      { event: "initialized" },
-      "Worker initialized successfully"
-    );
+    console.log(`Registered ${registeredJobs.length} job(s)`);
 
     // Set up graceful shutdown
-    process.on("SIGINT", async () => {
-      workerLogger.info(
-        { event: "shutdown_signal", signal: "SIGINT" },
-        "Shutting down worker"
-      );
-      await sseBroadcaster.cleanup();
-      await processVideoJob.close();
-      await splitAudioJob.close();
-      await translateVideoAudioClipJob.close();
-      await processAudioClipJob.close();
-      process.exit(0);
-    });
+    const shutdown = async (signal: string) => {
+      console.log(`Received ${signal}, shutting down gracefully...`);
 
-    process.on("SIGTERM", async () => {
-      workerLogger.info(
-        { event: "shutdown_signal", signal: "SIGTERM" },
-        "Shutting down worker"
+      // Close all jobs
+      await Promise.all(
+        registeredJobs.map((job) =>
+          job.close().catch((err) => {
+            console.error(
+              `Error closing job: ${
+                err instanceof Error ? err.message : String(err)
+              }`
+            );
+          })
+        )
       );
-      await sseBroadcaster.cleanup();
-      await processVideoJob.close();
-      await splitAudioJob.close();
-      await translateVideoAudioClipJob.close();
-      await processAudioClipJob.close();
+
       process.exit(0);
-    });
+    };
+
+    process.on("SIGINT", () => shutdown("SIGINT"));
+    process.on("SIGTERM", () => shutdown("SIGTERM"));
   } catch (error) {
-    Sentry.captureException(error);
-    workerLogger.error(
-      {
-        event: "initialization_failed",
-        error: error instanceof Error ? error.message : String(error),
-      },
-      "Failed to initialize worker"
+    console.error(
+      `Failed to initialize worker: ${
+        error instanceof Error ? error.message : String(error)
+      }`
     );
     process.exit(1);
   }
