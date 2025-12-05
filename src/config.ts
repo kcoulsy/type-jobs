@@ -1,4 +1,4 @@
-import type { DriverFactoryConfig, RedisDriverConfig } from "./drivers";
+import type { DriverFactoryConfig, RedisDriverConfig } from "./drivers/index.js";
 
 export interface TypedJobsConfig {
   driver: DriverFactoryConfig;

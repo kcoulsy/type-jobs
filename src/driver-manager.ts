@@ -1,6 +1,6 @@
-import type { Driver } from "./drivers/types";
-import type { DriverFactoryConfig } from "./drivers";
-import { createDriver } from "./drivers";
+import type { Driver } from "./drivers/types.js";
+import type { DriverFactoryConfig } from "./drivers/index.js";
+import { createDriver } from "./drivers/index.js";
 
 let globalDriver: Driver | null = null;
 

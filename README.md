@@ -50,9 +50,9 @@ export default defineConfig({
 });
 ```
 
-### 2. Add Script to package.json
+### 2. Add Script to package.json (Optional)
 
-Add the worker script to your `package.json`:
+You can add a script to your `package.json` for convenience:
 
 ```json
 {
@@ -60,6 +60,11 @@ Add the worker script to your `package.json`:
     "typed-jobs": "typed-jobs run"
   }
 }
+```
+
+Or run it directly:
+```bash
+npx typed-jobs run
 ```
 
 ### 3. Create Jobs Directory

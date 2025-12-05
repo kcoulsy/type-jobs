@@ -7,7 +7,7 @@ import type {
   DriverOptions,
   DriverQueue,
   DriverWorker,
-} from "./types";
+} from "./types.js";
 
 // biome-ignore lint/suspicious/noExplicitAny: driver needs to handle any job data
 class RedisQueue<TData = any> implements DriverQueue<TData> {
@@ -133,73 +133,159 @@ export interface RedisDriverConfig {
   tls?: boolean;
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: driver needs to handle any job data and result
 export class RedisDriver<TData = any, TResult = any>
   implements Driver<TData, TResult>
 {
   private connection: IORedis;
   private config: RedisDriverConfig;
+  private connectionPromise: Promise<IORedis> | null = null;
+  // Store resolved values from config + env
+  private resolvedConfig: {
+    host: string;
+    port: number;
+    username?: string;
+    password?: string;
+    tls: boolean;
+  };
 
   constructor(config: RedisDriverConfig = {}) {
     this.config = config;
+    const host = config.host || process.env.REDIS_HOST || "localhost";
+    const port = config.port || Number(process.env.REDIS_PORT) || 6379;
+    const username = config.username || process.env.REDIS_USERNAME;
+    const password = config.password || process.env.REDIS_PASSWORD;
+    const tls = config.tls || process.env.REDIS_TLS === "true";
+
+    // Store resolved values so createConnection can use them
+    this.resolvedConfig = { host, port, username, password, tls };
+
+    console.log("Creating Redis connection...", {
+      host,
+      port,
+      username: username || "(not set)",
+      password: password ? `${password.substring(0, 2)}***` : "(not set)",
+      tls: tls || false,
+    });
     this.connection = this.createConnection();
+    this.connectionPromise = this.waitForConnection();
+  }
+
+  private async waitForConnection(): Promise<IORedis> {
+    // Wait a short time for the connection to be ready, but don't block forever
+    // ioredis will handle reconnection automatically
+    if (this.connection.status === "ready") {
+      return this.connection;
+    }
+
+    // Wait up to 5 seconds for ready, but if it doesn't happen, return anyway
+    // BullMQ will handle connection issues
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        // Timeout - return connection anyway, let BullMQ handle it
+        console.log("Redis connection not ready yet, but proceeding anyway");
+        resolve(this.connection);
+      }, 5000); // 5 second timeout
+
+      const onReady = () => {
+        clearTimeout(timeout);
+        this.connection.off("ready", onReady);
+        console.log("Redis connection ready");
+        resolve(this.connection);
+      };
+
+      if (this.connection.status === "ready") {
+        clearTimeout(timeout);
+        resolve(this.connection);
+      } else {
+        this.connection.once("ready", onReady);
+      }
+    });
   }
 
   private createConnection(): IORedis {
     const redisOptions: RedisOptions = {
-      host: this.config.host || process.env.REDIS_HOST || "localhost",
-      port: this.config.port || Number(process.env.REDIS_PORT) || 6379,
+      host: this.resolvedConfig.host,
+      port: this.resolvedConfig.port,
       maxRetriesPerRequest: null,
     };
 
     // Only add authentication if credentials are provided
-    if (this.config.username && this.config.password) {
-      redisOptions.username = this.config.username;
-      redisOptions.password = this.config.password;
-    } else if (this.config.password || process.env.REDIS_PASSWORD) {
-      redisOptions.password =
-        this.config.password || process.env.REDIS_PASSWORD;
+    // Set both username and password if both are provided (Redis 6+ ACL)
+    if (this.resolvedConfig.username && this.resolvedConfig.password) {
+      redisOptions.username = this.resolvedConfig.username;
+      redisOptions.password = this.resolvedConfig.password;
+    } else if (this.resolvedConfig.password) {
+      // Legacy auth with just password
+      redisOptions.password = this.resolvedConfig.password;
     }
+    // Note: We don't set username-only auth because ioredis will try to authenticate
+    // even when Redis doesn't require it, causing connection issues
 
     // Add TLS if enabled
-    if (this.config.tls || process.env.REDIS_TLS === "true") {
+    if (this.resolvedConfig.tls) {
       redisOptions.tls = {};
     }
 
     const connection = new IORedis(redisOptions);
 
     // Add error handling
-    connection.on("error", (err: Error) => {
-      console.error("Redis connection error:", err);
+    connection.on("error", (err: Error & { code?: string }) => {
+      // Suppress common reconnection errors
+      if (
+        err.code !== "ECONNRESET" &&
+        err.code !== "ECONNREFUSED" &&
+        err.code !== "EPIPE"
+      ) {
+        console.error("Redis connection error:", err.message || err);
+      }
     });
 
+    let isFirstConnection = true;
+
     connection.on("connect", async () => {
-      console.log("Redis connected successfully");
+      if (isFirstConnection) {
+        console.log("Redis connected successfully");
+        isFirstConnection = false;
 
-      // Ensure eviction policy is set to noeviction for BullMQ
-      // This is CRITICAL - jobs must not be evicted from memory
-      try {
-        await connection.config("SET", "maxmemory-policy", "noeviction");
-        console.log("Redis eviction policy set to noeviction");
+        // Ensure eviction policy is set to noeviction for BullMQ
+        // This is CRITICAL - jobs must not be evicted from memory
+        try {
+          await connection.config("SET", "maxmemory-policy", "noeviction");
+          console.log("Redis eviction policy set to noeviction");
 
-        // Verify the setting was applied
-        const policy = await connection.config("GET", "maxmemory-policy");
-        const currentPolicy = Array.isArray(policy) ? policy[1] : policy;
-        if (currentPolicy !== "noeviction") {
-          console.warn(
-            `Warning: Redis eviction policy is ${currentPolicy}, expected noeviction`
-          );
+          // Verify the setting was applied
+          const policy = await connection.config("GET", "maxmemory-policy");
+          const currentPolicy = Array.isArray(policy) ? policy[1] : policy;
+          if (currentPolicy !== "noeviction") {
+            console.warn(
+              `Warning: Redis eviction policy is ${currentPolicy}, expected noeviction`
+            );
+          }
+        } catch (err) {
+          console.error("Failed to set Redis eviction policy:", err);
+          console.error("This may cause jobs to be evicted from memory!");
         }
-      } catch (err) {
-        console.error("Failed to set Redis eviction policy:", err);
-        console.error("This may cause jobs to be evicted from memory!");
       }
     });
 
     return connection;
   }
 
-  createQueue(options: DriverOptions): DriverQueue<TData> {
+  async createQueue(options: DriverOptions): Promise<DriverQueue<TData>> {
+    // Wait briefly for connection, but don't block forever
+    // BullMQ will handle connection issues
+    if (this.connectionPromise) {
+      try {
+        await this.connectionPromise;
+      } catch (error) {
+        // Log but don't throw - let BullMQ handle it
+        console.warn(
+          "Redis connection not ready yet, but proceeding anyway:",
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+    }
+
     const queue = new Queue<TData>(options.name, {
       connection: this.connection,
       defaultJobOptions: {
@@ -216,13 +302,27 @@ export class RedisDriver<TData = any, TResult = any>
     return new RedisQueue(queue);
   }
 
-  createWorker(
+  async createWorker(
     queue: DriverQueue<TData>,
     options: DriverOptions,
     handler: (
       job: DriverJob<TData>
     ) => Promise<{ success: boolean; data?: TResult; error?: string }>
-  ): DriverWorker<TData> {
+  ): Promise<DriverWorker<TData>> {
+    // Wait briefly for connection, but don't block forever
+    // BullMQ will handle connection issues
+    if (this.connectionPromise) {
+      try {
+        await this.connectionPromise;
+      } catch (error) {
+        // Log but don't throw - let BullMQ handle it
+        console.warn(
+          "Redis connection not ready yet, but proceeding anyway:",
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+    }
+
     // Get the underlying BullMQ queue
     const redisQueue = (queue as RedisQueue<TData>).getQueue();
 
@@ -258,5 +358,9 @@ export class RedisDriver<TData = any, TResult = any>
   // Expose underlying connection for advanced operations
   getRedisConnection(): IORedis {
     return this.connection;
+  }
+
+  get connectionReadyPromise(): Promise<void> {
+    return this.connectionPromise?.then(() => undefined) || Promise.resolve();
   }
 }

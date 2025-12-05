@@ -1,6 +1,6 @@
 // Main exports
-export { createJob, SimpleJob } from "./create-job";
-export type { JobOptions, JobContext, JobResult } from "./create-job";
+export { createJob, SimpleJob } from "./create-job.js";
+export type { JobOptions, JobContext, JobResult } from "./create-job.js";
 
 // Driver exports
 export type {
@@ -8,15 +8,15 @@ export type {
   DriverJob,
   DriverQueue,
   DriverWorker,
-} from "./drivers/types";
-export { RedisDriver } from "./drivers/redis";
-export type { RedisDriverConfig } from "./drivers/redis";
-export type { DriverType, DriverFactoryConfig } from "./drivers";
-export { createDriver } from "./drivers";
+} from "./drivers/types.js";
+export { RedisDriver } from "./drivers/redis.js";
+export type { RedisDriverConfig } from "./drivers/redis.js";
+export type { DriverType, DriverFactoryConfig } from "./drivers/index.js";
+export { createDriver } from "./drivers/index.js";
 
 // Config exports
-export { defineConfig, createRedisConfig } from "./config";
-export type { TypedJobsConfig } from "./config";
+export { defineConfig, createRedisConfig } from "./config.js";
+export type { TypedJobsConfig } from "./config.js";
 
 // Driver manager (for internal use, but exposed for advanced usage)
-export { setDriver, getDriver, hasDriver } from "./driver-manager";
+export { setDriver, getDriver, hasDriver } from "./driver-manager.js";

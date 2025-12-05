@@ -1,6 +1,6 @@
-import type { DriverJob, DriverQueue, DriverWorker } from "./drivers/types";
-import { getDriver } from "./driver-manager";
-import { jobLogger } from "./logger";
+import type { DriverJob, DriverQueue, DriverWorker } from "./drivers/types.js";
+import { getDriver } from "./driver-manager.js";
+import { jobLogger } from "./logger.js";
 
 export interface JobOptions {
   name: string;
@@ -38,7 +38,7 @@ export interface JobContext<TData = any> {
 
 // biome-ignore lint/suspicious/noExplicitAny: not worth it, it's typed e2e
 export class SimpleJob<TData = any, TResult = any> {
-  private queue: DriverQueue<TData>;
+  private queue: DriverQueue<TData> | null = null;
   private worker: DriverWorker<TData> | null = null;
   private handler: (context: JobContext<TData>) => Promise<TResult>;
   private options: JobOptions;
@@ -48,17 +48,25 @@ export class SimpleJob<TData = any, TResult = any> {
     handler: (context: JobContext<TData>) => Promise<TResult>
   ) {
     this.options = options;
-    const driver = getDriver();
-    this.queue = driver.createQueue({
-      name: options.name,
-      concurrency: options.concurrency,
-      attempts: options.attempts,
-      backoffDelay: options.backoffDelay,
-      removeOnComplete: options.removeOnComplete,
-      removeOnFail: options.removeOnFail,
-    });
-
     this.handler = handler;
+  }
+
+  private async getQueue(): Promise<DriverQueue<TData>> {
+    if (!this.queue) {
+      const driver = getDriver();
+      const queueResult = driver.createQueue({
+        name: this.options.name,
+        concurrency: this.options.concurrency,
+        attempts: this.options.attempts,
+        backoffDelay: this.options.backoffDelay,
+        removeOnComplete: this.options.removeOnComplete,
+        removeOnFail: this.options.removeOnFail,
+      });
+      // Handle both sync and async queue creation
+      this.queue =
+        queueResult instanceof Promise ? await queueResult : queueResult;
+    }
+    return this.queue;
   }
 
   async register(): Promise<void> {
@@ -66,9 +74,10 @@ export class SimpleJob<TData = any, TResult = any> {
       throw new Error("Worker already registered");
     }
 
+    const driverQueue = await this.getQueue();
     const driver = getDriver();
-    this.worker = driver.createWorker(
-      this.queue,
+    const workerResult = driver.createWorker(
+      driverQueue,
       {
         name: this.options.name,
         concurrency: this.options.concurrency,
@@ -88,10 +97,12 @@ export class SimpleJob<TData = any, TResult = any> {
               job.attemptsMade + 1 <
               (job.opts.attempts || this.options.attempts || 3),
             redispatch: async (delay?: number) => {
-              await this.queue.add(this.queue.name, job.data, { delay });
+              const driverQueue = await this.getQueue();
+              await driverQueue.add(driverQueue.name, job.data, { delay });
             },
             redispatchWithData: async (newData: TData, delay?: number) => {
-              await this.queue.add(this.queue.name, newData, { delay });
+              const driverQueue = await this.getQueue();
+              await driverQueue.add(driverQueue.name, newData, { delay });
             },
             getJob: () => job,
           };
@@ -117,6 +128,9 @@ export class SimpleJob<TData = any, TResult = any> {
         }
       }
     );
+    // Handle both sync and async worker creation
+    this.worker =
+      workerResult instanceof Promise ? await workerResult : workerResult;
 
     this.worker.on("completed", (job) => {
       jobLogger.info(
@@ -147,18 +161,20 @@ export class SimpleJob<TData = any, TResult = any> {
     jobLogger.info(
       {
         event: "worker_registered",
-        queueName: this.queue.name,
+        queueName: driverQueue.name,
       },
       "Worker registered for queue"
     );
   }
 
   async dispatch(data: TData): Promise<void> {
-    await this.queue.add(this.queue.name, data);
+    const driverQueue = await this.getQueue();
+    await driverQueue.add(driverQueue.name, data);
   }
 
   async dispatchWithDelay(data: TData, delay: number): Promise<void> {
-    await this.queue.add(this.queue.name, data, { delay });
+    const driverQueue = await this.getQueue();
+    await driverQueue.add(driverQueue.name, data, { delay });
   }
 
   async close(): Promise<void> {
@@ -166,13 +182,16 @@ export class SimpleJob<TData = any, TResult = any> {
       await this.worker.close();
       this.worker = null;
     }
-    await this.queue.close();
+    if (this.queue) {
+      await this.queue.close();
+      this.queue = null;
+    }
   }
 
   // Method to get the queue instance for advanced operations
   // Note: This returns the driver queue, which may have driver-specific methods
-  getQueue(): DriverQueue<TData> {
-    return this.queue;
+  async getQueueInstance(): Promise<DriverQueue<TData>> {
+    return this.getQueue();
   }
 }
 

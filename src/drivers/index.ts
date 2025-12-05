@@ -5,13 +5,13 @@ export type {
   DriverOptions,
   DriverQueue,
   DriverWorker,
-} from "./types";
-export { RedisDriver } from "./redis";
-export type { RedisDriverConfig } from "./redis";
+} from "./types.js";
+export { RedisDriver } from "./redis.js";
+export type { RedisDriverConfig } from "./redis.js";
 
-import type { Driver } from "./types";
-import type { RedisDriverConfig } from "./redis";
-import { RedisDriver } from "./redis";
+import type { Driver } from "./types.js";
+import type { RedisDriverConfig } from "./redis.js";
+import { RedisDriver } from "./redis.js";
 
 export type DriverType = "redis" | "rabbitmq"; // Future: add more drivers
 

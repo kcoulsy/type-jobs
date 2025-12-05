@@ -42,13 +42,13 @@ export interface DriverOptions {
 
 // biome-ignore lint/suspicious/noExplicitAny: driver needs to handle any job data and result
 export interface Driver<TData = any, TResult = any> {
-  createQueue(options: DriverOptions): DriverQueue<TData>;
+  createQueue(options: DriverOptions): Promise<DriverQueue<TData>>;
   createWorker(
     queue: DriverQueue<TData>,
     options: DriverOptions,
     handler: (
       job: DriverJob<TData>
     ) => Promise<{ success: boolean; data?: TResult; error?: string }>
-  ): DriverWorker<TData>;
+  ): Promise<DriverWorker<TData>>;
   getConnection(): DriverConnection;
 }

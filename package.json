@@ -2,8 +2,18 @@
   "name": "type-jobs",
   "version": "1.0.0",
   "description": "A type-safe, driver-based job queue system for JavaScript/TypeScript projects.",
+  "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "typed-jobs": "./dist/cli.js"
+  },
   "scripts": {
     "build": "tsc",
     "test": "echo \"Error: no test specified\" && exit 1"
